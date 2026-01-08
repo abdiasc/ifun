@@ -14,6 +14,8 @@ class DeviceCard extends StatelessWidget {
     required this.protocol,
     required this.isConnected,
     required this.onConnect,
+    required String macAddress,
+    required int signalStrength,
   });
 
   @override

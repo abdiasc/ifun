@@ -1,7 +1,12 @@
-// ignore_for_file: library_private_types_in_public_api
+// ignore_for_file: library_private_types_in_public_api, use_build_context_synchronously
+
+import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'dart:async';
+import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../widgets/device_card.dart';
 import '../utils/constants.dart';
 
@@ -15,28 +20,122 @@ class ConnectionScreen extends StatefulWidget {
 class _ConnectionScreenState extends State<ConnectionScreen> {
   String _connectionStatus = 'Desconectado';
   bool _isScanning = false;
-  String? _connectedDevice;
-  List<String> _availableDevices = [];
+  // ignore: prefer_final_fields
+  bool _bluetoothEnabled = true;
+
+  DiscoveredDevice? _connectedDevice;
+  final List<DiscoveredDevice> _availableDevices = [];
+  final Map<String, int> _deviceSignalStrength = {};
+
+  StreamSubscription<DiscoveredDevice>? _scanSubscription;
+  StreamSubscription<ConnectionStateUpdate>? _connectionSubscription;
+
+  final FlutterReactiveBle _ble = FlutterReactiveBle();
+
+  DeviceConnectionState _connectionState = DeviceConnectionState.disconnected;
+  static const String _lastDeviceKey = 'last_ble_device';
 
   @override
   void initState() {
     super.initState();
-    _loadDevices();
+    _ble.connectedDeviceStream.listen(_handleConnectionStateChange);
+    _tryAutoReconnect();
   }
+
+  @override
+  void dispose() {
+    _scanSubscription?.cancel();
+    _connectionSubscription?.cancel();
+    super.dispose();
+  }
+
+  // ===================== CONNECTION STATE =====================
+
+  void _handleConnectionStateChange(ConnectionStateUpdate state) {
+    if (!mounted) return;
+
+    DiscoveredDevice? device;
+    try {
+      device = _availableDevices.firstWhere(
+        (d) => d.id == state.deviceId,
+      );
+    } catch (_) {
+      device = null;
+    }
+
+    setState(() {
+      _connectionState = state.connectionState;
+
+      if (state.connectionState == DeviceConnectionState.connected) {
+        _connectionStatus = 'Conectado';
+        _connectedDevice = device;
+        _saveLastDevice(state.deviceId);
+      } else if (state.connectionState == DeviceConnectionState.connecting) {
+        _connectionStatus = 'Conectando...';
+      } else {
+        _connectionStatus = 'Desconectado';
+        _connectedDevice = null;
+      }
+    });
+  }
+
+  // ===================== UI =====================
 
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildBluetoothStatusCard(),
+          const SizedBox(height: 20),
+          _buildConnectionStatusCard(),
+          const SizedBox(height: 20),
+          _buildProtocolTypesCard(),
+          const SizedBox(height: 20),
+          _buildDevicesListCard(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBluetoothStatusCard() {
+    return Card(
+      elevation: 3,
+      color: _bluetoothEnabled ? Colors.green[50] : Colors.red[50],
       child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+        padding: const EdgeInsets.all(16),
+        child: Row(
           children: [
-            _buildConnectionStatusCard(),
-            const SizedBox(height: 20),
-            _buildProtocolTypesCard(),
-            const SizedBox(height: 20),
-            _buildDevicesListCard(),
+            Icon(
+              _bluetoothEnabled
+                  ? Icons.bluetooth_connected
+                  : Icons.bluetooth_disabled,
+              color: _bluetoothEnabled ? Colors.green : Colors.red,
+              size: 30,
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _bluetoothEnabled
+                        ? 'Bluetooth Activado'
+                        : 'Bluetooth Desactivado',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: _bluetoothEnabled ? Colors.green : Colors.red,
+                    ),
+                  ),
+                  const Text(
+                    'Listo para escanear dispositivos',
+                    style: TextStyle(fontSize: 12, color: Colors.black54),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       ),
@@ -44,10 +143,12 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   }
 
   Widget _buildConnectionStatusCard() {
+    final connected = _connectionState == DeviceConnectionState.connected;
+
     return Card(
       elevation: 4,
       child: Padding(
-        padding: const EdgeInsets.all(20.0),
+        padding: const EdgeInsets.all(20),
         child: Column(
           children: [
             Stack(
@@ -57,24 +158,14 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                   width: 120,
                   height: 120,
                   child: CircularProgressIndicator(
-                    value: _connectionStatus.contains('Conectado') ? 1.0 : 0.0,
-                    backgroundColor: Colors.grey[300],
-                    valueColor: AlwaysStoppedAnimation<Color>(
-                      _connectionStatus.contains('Conectado')
-                          ? Colors.green
-                          : Colors.blue,
-                    ),
+                    value: connected ? 1 : null,
                     strokeWidth: 8,
                   ),
                 ),
                 Icon(
-                  _connectionStatus.contains('Conectado')
-                      ? Icons.link
-                      : Icons.link_off,
+                  connected ? Icons.link : Icons.link_off,
                   size: 50,
-                  color: _connectionStatus.contains('Conectado')
-                      ? Colors.green
-                      : Colors.red,
+                  color: connected ? Colors.green : Colors.red,
                 ),
               ],
             ),
@@ -83,46 +174,35 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
               _connectionStatus,
               style: TextStyle(
                 fontSize: 22,
-                color: _connectionStatus.contains('Conectado')
-                    ? Colors.green
-                    : Colors.red,
                 fontWeight: FontWeight.bold,
+                color: connected ? Colors.green : Colors.red,
               ),
             ),
-            if (_connectedDevice != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 8.0),
-                child: Text(
-                  _connectedDevice!,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    color: Colors.grey,
-                  ),
+            if (_connectedDevice != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                _connectedDevice!.name.isNotEmpty
+                    ? _connectedDevice!.name
+                    : _connectedDevice!.id,
+                style: const TextStyle(
+                  color: Colors.grey,
+                  fontSize: 16,
                 ),
               ),
+            ],
             const SizedBox(height: 20),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
                 ElevatedButton.icon(
-                  onPressed: _isScanning ? null : _startScan,
-                  icon: Icon(_isScanning ? Icons.search_off : Icons.search),
+                  onPressed: _isScanning ? _stopScan : _startScan,
+                  icon: Icon(_isScanning ? Icons.stop : Icons.search),
                   label: Text(_isScanning ? 'Detener' : 'Escanear'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _isScanning ? Colors.orange : Colors.blueAccent,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                  ),
                 ),
                 ElevatedButton.icon(
-                  onPressed: _connectionStatus.contains('Conectado') ? _disconnect : null,
+                  onPressed: connected ? _disconnect : null,
                   icon: const Icon(Icons.power_settings_new),
                   label: const Text('Desconectar'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.redAccent,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                  ),
                 ),
               ],
             ),
@@ -136,33 +216,12 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     return Card(
       elevation: 3,
       child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Tipos de Protocolos',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 10),
-            SizedBox(
-              height: 60,
-              child: ListView.builder(
-                scrollDirection: Axis.horizontal,
-                itemCount: AppConstants.deviceTypes.length,
-                itemBuilder: (context, index) {
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 8.0),
-                    child: FilterChip(
-                      label: Text(AppConstants.deviceTypes[index]),
-                      selected: false,
-                      onSelected: (selected) {},
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
+        padding: const EdgeInsets.all(16),
+        child: Wrap(
+          spacing: 8,
+          children: AppConstants.deviceTypes
+              .map((e) => Chip(label: Text(e)))
+              .toList(),
         ),
       ),
     );
@@ -172,167 +231,142 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     return Card(
       elevation: 4,
       child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Dispositivos Disponibles',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.refresh),
-                  onPressed: _loadDevices,
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            _availableDevices.isEmpty
-                ? _buildEmptyState()
-                : _buildDevicesList(),
-          ],
-        ),
+        padding: const EdgeInsets.all(16),
+        child: _availableDevices.isEmpty
+            ? const Center(
+                child: Text('No se encontraron dispositivos'),
+              )
+            : ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: _availableDevices.length,
+                itemBuilder: (_, index) {
+                  final device = _availableDevices[index];
+                  return DeviceCard(
+                    deviceName:
+                        device.name.isNotEmpty ? device.name : device.id,
+                    macAddress: device.id,
+                    protocol: _getProtocolFromDevice(device.name),
+                    signalStrength: device.rssi,
+                    isConnected: _connectedDevice?.id == device.id,
+                    onConnect: () => _connectToDevice(device),
+                  );
+                },
+              ),
       ),
     );
   }
 
-  Widget _buildEmptyState() {
-    return SizedBox(
-      height: 200,
-      child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.devices, size: 64, color: Colors.grey),
-            const SizedBox(height: 16),
-            const Text(
-              'No se encontraron dispositivos',
-              style: TextStyle(color: Colors.grey),
-            ),
-            const SizedBox(height: 10),
-            ElevatedButton(
-              onPressed: _startScan,
-              child: const Text('Buscar dispositivos'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  // ===================== BLE =====================
 
-  Widget _buildDevicesList() {
-    return ListView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      itemCount: _availableDevices.length,
-      itemBuilder: (context, index) {
-        final device = _availableDevices[index];
-        return DeviceCard(
-          deviceName: device,
-          protocol: _getProtocolFromDevice(device),
-          isConnected: _connectedDevice == device,
-          onConnect: () => _connectToDevice(device),
-        );
-      },
-    );
-  }
-
-  void _loadDevices() {
-    Future.delayed(const Duration(milliseconds: 500), () {
-      setState(() {
-        _availableDevices = AppConstants.sampleDevices;
-      });
-    });
-  }
-
-  String _getProtocolFromDevice(String device) {
-    if (device.toLowerCase().contains('obd')) return 'OBD-II';
-    if (device.toLowerCase().contains('j2534')) return 'J2534';
-    if (device.toLowerCase().contains('kess')) return 'K-Line';
-    if (device.toLowerCase().contains('k-tag')) return 'K-TAG';
-    return 'CAN';
-  }
-
-  void _startScan() {
-    if (_isScanning) {
-      setState(() => _isScanning = false);
-      return;
-    }
+  Future<void> _startScan() async {
+    final ok = await _requestPermissions();
+    if (!ok) return;
 
     setState(() {
       _isScanning = true;
       _availableDevices.clear();
+      _deviceSignalStrength.clear();
     });
 
-    Timer.periodic(const Duration(milliseconds: 500), (timer) {
-      if (!_isScanning) {
-        timer.cancel();
-        return;
-      }
-
-      setState(() {
-        final newDevices = [
-          'OBD-II Scanner ${_availableDevices.length + 1}',
-          'J2534 Device ${_availableDevices.length + 1}',
-        ];
-        _availableDevices.addAll(newDevices);
-      });
-
-      if (_availableDevices.length >= 8) {
-        setState(() => _isScanning = false);
-        timer.cancel();
+    _scanSubscription = _ble.scanForDevices(
+      withServices: [],
+      scanMode: ScanMode.lowLatency,
+    ).listen((device) {
+      if (_availableDevices.every((d) => d.id != device.id)) {
+        setState(() {
+          _availableDevices.add(device);
+        });
       }
     });
+
+    await Future.delayed(const Duration(seconds: 5));
+    _stopScan();
   }
 
-  void _connectToDevice(String device) {
+  Future<void> _stopScan() async {
+    await _scanSubscription?.cancel();
+    setState(() => _isScanning = false);
+  }
+
+  Future<void> _connectToDevice(DiscoveredDevice device) async {
+    await _scanSubscription?.cancel(); // 🔴 MUY IMPORTANTE
+    _scanSubscription = null;
+
     setState(() {
-      _connectedDevice = device;
-      _connectionStatus = 'Conectado';
+      _isScanning = false;
+      _connectionStatus = 'Conectando...';
     });
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Conectado a $device'),
-        backgroundColor: Colors.green,
-        duration: const Duration(seconds: 2),
-        behavior: SnackBarBehavior.floating,
-      ),
+    _connectionSubscription?.cancel();
+    _connectionSubscription = _ble
+        .connectToDevice(
+      id: device.id,
+      connectionTimeout: const Duration(seconds: 10),
+    )
+        .listen(
+      _handleConnectionStateChange,
+      onError: (error) {
+        setState(() {
+          _connectionStatus = 'Error de conexión';
+        });
+      },
     );
   }
 
-  void _disconnect() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Desconectar'),
-        content: const Text('¿Está seguro de que desea desconectar el dispositivo?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancelar'),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              setState(() {
-                _connectionStatus = 'Desconectado';
-                _connectedDevice = null;
-              });
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Dispositivo desconectado'),
-                  backgroundColor: Colors.orange,
-                ),
-              );
-            },
-            child: const Text('Desconectar', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
-    );
+  Future<void> _disconnect() async {
+    await _connectionSubscription?.cancel();
+    setState(() {
+      _connectedDevice = null;
+      _connectionState = DeviceConnectionState.disconnected;
+      _connectionStatus = 'Desconectado';
+    });
+  }
+
+  Future<void> _saveLastDevice(String deviceId) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_lastDeviceKey, deviceId);
+  }
+
+  Future<void> _tryAutoReconnect() async {
+    final prefs = await SharedPreferences.getInstance();
+    final lastDeviceId = prefs.getString(_lastDeviceKey);
+
+    if (lastDeviceId == null) return;
+
+    setState(() {
+      _connectionStatus = 'Reconectando...';
+    });
+
+    _connectionSubscription = _ble
+        .connectToDevice(
+      id: lastDeviceId,
+      connectionTimeout: const Duration(seconds: 10),
+    )
+        .listen(_handleConnectionStateChange, onError: (_) {
+      setState(() {
+        _connectionStatus = 'Desconectado';
+      });
+    });
+  }
+
+  // ===================== HELPERS =====================
+
+  Future<bool> _requestPermissions() async {
+    final permissions = await [
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+      Permission.location,
+    ].request();
+
+    return permissions.values.every((p) => p.isGranted);
+  }
+
+  String _getProtocolFromDevice(String name) {
+    final d = name.toLowerCase();
+    if (d.contains('obd')) return 'OBD-II';
+    if (d.contains('elm')) return 'OBD-II';
+    if (d.contains('can')) return 'CAN';
+    return 'BLE';
   }
 }

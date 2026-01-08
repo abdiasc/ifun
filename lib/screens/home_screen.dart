@@ -35,7 +35,8 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: _screens[_currentIndex],
       bottomNavigationBar: _buildBottomNavigationBar(),
-      floatingActionButton: _currentIndex == 0 ? _buildFloatingActionButton(context) : null,
+      floatingActionButton:
+          _currentIndex == 0 ? _buildFloatingActionButton(context) : null,
     );
   }
 
@@ -72,7 +73,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return FloatingActionButton.extended(
       onPressed: () => _showQuickActions(context),
       icon: const Icon(Icons.bolt),
-      label: const Text('Acciones Rápidas'),
+      label: const Text(''),
       backgroundColor: Colors.blueAccent,
     );
   }
